@@ -1,10 +1,4 @@
 import os
-import sys
-
-upload_path = './upload'
-if not os.path.exists(upload_path):
-    os.system(f"mkdir {upload_path}")
-
 from flask import (
     Flask,
     request,
@@ -16,29 +10,46 @@ from flask import (
     send_from_directory,
 )
 import logging
+import secrets
+from urllib.parse import quote
+
+from werkzeug.utils import secure_filename
+
+from main.recognize import recognize
+from main.utils.config import load_config
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-from main.recognize import recognize
-from urllib.parse import quote
-import secrets
 
-app = Flask(__name__)
+configs = load_config()
+static = os.path.abspath(configs["static"])
+uploaded_folder = os.path.abspath(configs["upload_dir"])
+os.makedirs(uploaded_folder, exist_ok=True)
+
+app = Flask(__name__, template_folder="templates", static_folder=None)
 secret_key = secrets.token_hex(24)
-with open('key.yml','w+') as key_w:
+with open("key.yml", "w", encoding="utf-8") as key_w:
     key_w.write(f'Web_Secret_Key: "{secret_key}"\n')
 app.secret_key = secret_key
 
+
+def clear_uploaded_folder():
+    for filename in os.listdir(uploaded_folder):
+        file_path = os.path.join(uploaded_folder, filename)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+
+
+def build_upload_path(filename):
+    safe_name = secure_filename(filename) or "upload.jpg"
+    generated_name = f"{secrets.token_hex(8)}_{safe_name}"
+    return generated_name, os.path.join(uploaded_folder, generated_name)
+
 @app.route("/", methods=["GET"])
 def index():
-    if os.listdir(uploaded_folder):
-        for file in os.listdir(uploaded_folder):
-            os.remove(os.path.join(uploaded_folder, file))
+    clear_uploaded_folder()
     return render_template("index.html")
-
-
-# 使用绝对路径来确保路径的准确性
-static = os.path.abspath(configs["static"])
-uploaded_folder = os.path.abspath(configs["upload_dir"])
 
 
 @app.route("/ur", methods=['POST'])
@@ -53,26 +64,22 @@ def upload_recognize():
 
     if pic:
         try:
-            # 保存上传的文件
-            file_path = os.path.join(str(uploaded_folder), str(pic.filename))
+            stored_name, file_path = build_upload_path(pic.filename)
             pic.save(file_path)
 
             result = recognize(file_path)
-            print(f'res: {result}')
             category = str(result[1][0])
-            print(f'cate:{category}')
             encoded_category_name = quote(
                 category.split(" ")[1] if len(category.split(" ")) > 1 else category
             )
-            print(f'encoded_cname:{encoded_category_name}')
 
-            session["result_image"] = pic.filename
+            session["result_image"] = stored_name
             session["result_category"] = category
             session["result_encoded_category"] = encoded_category_name
-            print('session End')
             return jsonify({"redirect": url_for("result")})
 
         except Exception as e:
+            logger.exception("Recognition failed")
             return jsonify({"error": str(e)}), 500
 
 
@@ -100,7 +107,7 @@ def result():
 def serve_uploaded(filename):
     return send_from_directory(uploaded_folder, filename)
 
-@app.route("/static/<filename>")
+@app.route("/static/<path:filename>")
 def serve_static(filename):
     return send_from_directory(static, filename)
 
@@ -114,5 +121,4 @@ def butterfly():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0",port=8090, debug=True)
-logging.basicConfig(level=logging.INFO)
+    app.run(host="0.0.0.0", port=8090, debug=True)

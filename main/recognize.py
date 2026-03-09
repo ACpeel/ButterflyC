@@ -1,64 +1,69 @@
+import json
 import os
-import sys
-import main.train as train
-import main.model as model
-import main.utils.config as config
-import main.utils.process as process
-import main.utils.eval as eval
+from functools import lru_cache
+
 import numpy as np
 import tensorflow as tf
 
+import main.utils.config as config
+import main.utils.process as process
+from main.utils.labels import load_label_artifacts
+
 configs = config.load_config()
 
-
-def get_uploaded_pic():
-    uploaded_path = configs["upload_dir"]
-    uploaded_pics = []
-    for pic in os.listdir(uploaded_path):
-        full_path = os.path.join(uploaded_path, pic)
-        uploaded_pics.append(full_path)
-    return uploaded_pics
+def load_serving_manifest():
+    manifest_path = configs.get("manifest_path")
+    if manifest_path and os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+            return json.load(manifest_file)
+    return {}
 
 
-def load_model():
-    model_path= configs['model_path']
-    bc = os.path.join(model_path,'ButterflyC.keras')
-    if not os.path.exists(bc):
-        print('Train model first!')
-    model = tf.keras.models.load_model(bc)
-    return model
+class RecognitionService:
+    def __init__(self):
+        manifest = load_serving_manifest()
+        keras_model_path = manifest.get(
+            "keras_model_path",
+            os.path.join(configs["model_path"], "ButterflyC.keras"),
+        )
+        labels_path = manifest.get("labels_path", configs["labels_path"])
 
+        if not os.path.exists(keras_model_path):
+            raise FileNotFoundError(f"Model file not found: {keras_model_path}")
+        if not os.path.exists(labels_path):
+            raise FileNotFoundError(f"Labels file not found: {labels_path}")
 
-def recognize(pic_path):
-    uploaded_pic = get_uploaded_pic()  # 获取上传的图片路径
-    model = load_model()  # 加载模型
-    label_encoder  = process.encode_labels(configs['train_csv'])
+        self.model = tf.keras.models.load_model(keras_model_path)
+        self.labels = load_label_artifacts(labels_path)
 
-    if pic_path:
-        result = []
-        result.append(uploaded_pic[0])
+    def predict(self, pic_path):
+        if not pic_path:
+            return [None, ["default"]]
 
         pic_array = process.process_img(
             pic_path,
             (configs["image_size"], configs["image_size"]),
         )
+        predictions = self.model.predict(pic_array, verbose=0)
+        predicted_index = int(np.argmax(predictions, axis=1)[0])
 
-        predictions = model.predict(pic_array)
-        predicted_classes = np.argmax(predictions, axis=1)
+        if predicted_index >= len(self.labels):
+            raise IndexError(
+                f"Predicted class index {predicted_index} is out of range for labels."
+            )
 
-        # 转换为 Python 列表，确保返回结果可以被 JSON 序列化
-        recognized_label = label_encoder.inverse_transform(
-                    predicted_classes
-                ).tolist()
+        return [pic_path, [self.labels[predicted_index]]]
 
-        # 将标签追加到结果中
-        result.append(recognized_label)
 
-        print(f"{result[0]} ---- {result[1]}")
-        return result
-    else:
-        print("No selected file")
-        return [None, "default"]
+@lru_cache(maxsize=1)
+def get_recognition_service():
+    return RecognitionService()
+
+
+def recognize(pic_path):
+    result = get_recognition_service().predict(pic_path)
+    print(f"{result[0]} ---- {result[1]}")
+    return result
 
 
 if __name__ == "__main__":

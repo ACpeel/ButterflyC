@@ -1,13 +1,26 @@
-device: "CPU"
+device: "GPU"
 num_classes: 75
 image_size: 224
-batch_size: 16
+batch_size: 24
 capacity: 250
 precision: "float16"
 learning_rate: 0.001
 fine_tuning_learning_rate: 0.0001
 initial_epochs: 10
 fine_tuning_epochs: 90
+# 面向 8 核 CPU + GTX 1080 Ti 的默认高占用训练档，目标约 80% 资源使用
+validation_frequency: 1
+rich_progress_refresh_per_second: 4
+process_nice_increment: 2
+tf_intra_op_threads: 6
+tf_inter_op_threads: 2
+tf_data_parallel_calls: 4
+tf_data_prefetch: 2
+tf_data_private_threadpool_size: 6
+tf_data_max_intra_op_parallelism: 2
+tf_shuffle_buffer: 2048
+gpu_memory_growth: true
+gpu_memory_limit_mb: 9000
 
 # --------------------------------------
 
@@ -19,6 +32,9 @@ model_suffix: "-br.keras"
 
 model_path: "main/models"
 log_dir: "main/models/log"
+saved_model_dir: "main/models/saved_model"
+manifest_path: "main/models/model_manifest.json"
+labels_path: "main/models/labels.json"
 
 data: "TEMP/data"
 upload_dir: "app/upload"

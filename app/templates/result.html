@@ -54,7 +54,7 @@
     <body>
         <div class="container">
             <div class="image-section">
-                <img src="{{ image }}" alt="Uploaded Butterfly Image" />
+                <img id="result-image" alt="Uploaded Butterfly Image" />
             </div>
             <div class="category-section">
                 <h2><strong id="category-display"></strong></h2>
@@ -65,19 +65,44 @@
                     >👈
                 </p>
             </div>
-            <a href="{{ url_for('index') }}" class="button">返回首页</a>
+            <a href="/" class="button" id="home-link">返回首页</a>
         </div>
 
         <script>
-            const categoryFull = "{{ category }}";
+            const templateImage = "{{ image }}";
+            const templateCategory = "{{ category }}";
+            const templateHome = "{{ url_for('index') }}";
+            const isTemplateLiteral = (value) =>
+                typeof value === "string" && value.includes("{{");
+            const params = new URLSearchParams(window.location.search);
+            const resolvedImage = isTemplateLiteral(templateImage)
+                ? params.get("image") || ""
+                : templateImage;
+            const resolvedCategory = isTemplateLiteral(templateCategory)
+                ? params.get("category") || ""
+                : templateCategory;
+            const resolvedHome = isTemplateLiteral(templateHome)
+                ? "/"
+                : templateHome;
+
+            const categoryFull = resolvedCategory;
             const categoryParts = categoryFull.split(" ");
             const displayCategory =
                 categoryParts.length > 1 ? categoryParts[1] : categoryFull;
+            const imagePath =
+                resolvedImage && resolvedImage.startsWith("/")
+                    ? resolvedImage
+                    : resolvedImage
+                      ? `/uploaded/${resolvedImage}`
+                      : "";
+
+            document.getElementById("result-image").src = imagePath;
             document.getElementById("category-display").innerText =
                 categoryFull; // Display the full category
             const encodedCategory = encodeURIComponent(displayCategory);
             document.getElementById("category-link").href =
                 `https://www.inaturalist.org/search?q=${encodedCategory}`;
+            document.getElementById("home-link").href = resolvedHome;
         </script>
     </body>
 </html>
