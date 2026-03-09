@@ -1,0 +1,25 @@
+[project]
+name = "butterflyc"
+version = "0.1.0"
+description = "Butterfly recognition and web serving project"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "flask>=3.1,<4",
+    "kagglehub>=1,<2",
+    "tensorflow[and-cuda]>=2.20,<2.21; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "tensorflow>=2.20,<2.21; platform_system != 'Linux' or platform_machine != 'x86_64'",
+    "scikit-learn>=1.5,<2",
+    "numpy>=1.26,<3",
+    "pyyaml>=6,<7",
+    "pandas>=2.2,<3",
+    "pillow>=10,<12",
+    "rich>=13.9,<14",
+    "tqdm>=4.67,<5",
+    "matplotlib>=3.9,<4",
+    "opencv-python>=4.10,<5",
+    "imbalanced-learn>=0.13,<0.15",
+]
+
+[tool.uv]
+package = false

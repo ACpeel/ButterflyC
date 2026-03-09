@@ -7,4 +7,9 @@ log
 *.keras
 *.h5
 prompt.md
-
+build/
+key.yml
+main/models/
+app/upload/*
+!app/upload/butterfly.jpg
+AGENTS.md
