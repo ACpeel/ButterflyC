@@ -182,6 +182,9 @@ crow::json::wvalue ErrorPayload(const std::string& message) {
 }
 
 std::vector<float> PreprocessImageBytes(const std::vector<char>& bytes, int image_size) {
+    static constexpr float kMean[3] = {0.485F, 0.456F, 0.406F};
+    static constexpr float kStd[3] = {0.229F, 0.224F, 0.225F};
+
     cv::Mat buffer(1, static_cast<int>(bytes.size()), CV_8U, const_cast<char*>(bytes.data()));
     cv::Mat image = cv::imdecode(buffer, cv::IMREAD_COLOR);
     if (image.empty()) {
@@ -196,6 +199,7 @@ std::vector<float> PreprocessImageBytes(const std::vector<char>& bytes, int imag
     const size_t plane_size = static_cast<size_t>(image_size) * image_size;
     std::vector<float> chw(3 * plane_size);
     for (int c = 0; c < 3; ++c) {
+        channels[c] = (channels[c] - kMean[c]) * (1.0F / kStd[c]);
         if (!channels[c].isContinuous()) {
             channels[c] = channels[c].clone();
         }
@@ -269,7 +273,7 @@ public:
                 metadata_.image_size,
             };
             Ort::MemoryInfo memory_info =
-                Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+                Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
             Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
                 memory_info,
                 input.data(),
