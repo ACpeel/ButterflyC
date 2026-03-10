@@ -1,193 +1,36 @@
 import argparse
+import csv
 import json
 import os
-import shutil
+import random
 import time
 
-STRICT_CONV_PICKER_FLAG = "--xla_gpu_strict_conv_algorithm_picker=false"
-existing_xla_flags = os.environ.get("XLA_FLAGS", "").strip()
-if "xla_gpu_strict_conv_algorithm_picker" not in existing_xla_flags:
-    os.environ["XLA_FLAGS"] = " ".join(
-        flag
-        for flag in (existing_xla_flags, STRICT_CONV_PICKER_FLAG)
-        if flag
-    )
+import numpy as np
+import torch
+from torch import nn
+from torch.cuda.amp import GradScaler
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-import tensorflow as tf
-from tensorflow.keras.callbacks import (
-    CSVLogger,
-    ModelCheckpoint,
-    ReduceLROnPlateau,
-    TerminateOnNaN,
+from main.torch_model import (
+    build_torch_model,
+    count_trainable_parameters,
+    freeze_backbone,
+    normalize_model_name,
+    unfreeze_model,
 )
-
-from main.model import ButterflyC, DenseNet121M, ResNet50M, VGG16M
 from main.utils.config import load_config
 from main.utils.labels import export_label_artifacts
-from main.utils.process import load_data
+from main.utils.torch_process import load_data, move_batch_to_device
 from main.utils.training_monitor import RuntimeSummary, TrainingMonitor
 
-MODEL_BUILDERS = {
-    "ButterflyC": ButterflyC,
-    "VGG16M": VGG16M,
-    "ResNet50M": ResNet50M,
-    "DenseNet121M": DenseNet121M,
-}
 
-
-def count_trainable_parameters(model):
-    return int(
-        sum(
-            tf.keras.backend.count_params(weight)
-            for weight in model.trainable_weights
-        )
-    )
-
-
-def configure_runtime(configs):
-    nice_increment = int(configs.get("process_nice_increment", 0) or 0)
-    inter_op_threads = configs.get("tf_inter_op_threads")
-    intra_op_threads = configs.get("tf_intra_op_threads")
-    precision = str(configs.get("precision", "float32")).lower()
-    gpu_strategy = "CPU-only"
-
-    if precision in {"float16", "mixed_float16"}:
-        tf.keras.mixed_precision.set_global_policy("mixed_float16")
-    else:
-        tf.keras.mixed_precision.set_global_policy("float32")
-
-    if nice_increment and hasattr(os, "nice"):
-        try:
-            os.nice(nice_increment)
-        except OSError:
-            pass
-
-    tf.config.optimizer.set_jit(False)
-
-    if inter_op_threads:
-        tf.config.threading.set_inter_op_parallelism_threads(inter_op_threads)
-    if intra_op_threads:
-        tf.config.threading.set_intra_op_parallelism_threads(intra_op_threads)
-
-    gpus = tf.config.list_physical_devices("GPU")
-    if not gpus:
-        return RuntimeSummary(
-            device_type="CPU",
-            device_names=[],
-            nice_increment=nice_increment,
-            tf_inter_op_threads=inter_op_threads,
-            tf_intra_op_threads=intra_op_threads,
-            gpu_strategy=gpu_strategy,
-        )
-
-    gpu_memory_limit_mb = configs.get("gpu_memory_limit_mb")
-    if gpu_memory_limit_mb:
-        try:
-            tf.config.set_logical_device_configuration(
-                gpus[0],
-                [tf.config.LogicalDeviceConfiguration(memory_limit=gpu_memory_limit_mb)],
-            )
-            gpu_strategy = f"显存上限 {gpu_memory_limit_mb}MB"
-        except RuntimeError:
-            gpu_strategy = "显存上限设置失败，沿用默认配置"
-
-    elif configs.get("gpu_memory_growth", True):
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            gpu_strategy = "memory growth"
-        except RuntimeError:
-            gpu_strategy = "memory growth 设置失败，沿用默认配置"
-
-    return RuntimeSummary(
-        device_type="GPU",
-        device_names=[gpu.name for gpu in gpus],
-        nice_increment=nice_increment,
-        tf_inter_op_threads=inter_op_threads,
-        tf_intra_op_threads=intra_op_threads,
-        gpu_strategy=gpu_strategy,
-    )
-
-
-def build_serving_signature(model, configs):
-    image_size = configs["image_size"]
-
-    @tf.function(
-        input_signature=[
-            tf.TensorSpec(shape=[None], dtype=tf.string, name="image_bytes"),
-        ]
-    )
-    def serve_bytes(image_bytes):
-        def preprocess_single_image(image_content):
-            image = tf.io.decode_image(
-                image_content, channels=3, expand_animations=False
-            )
-            image.set_shape([None, None, 3])
-            image = tf.image.resize(image, [image_size, image_size])
-            image = tf.cast(image, tf.float32) / 255.0
-            return image
-
-        batch = tf.map_fn(
-            preprocess_single_image,
-            image_bytes,
-            fn_output_signature=tf.TensorSpec(
-                shape=(image_size, image_size, 3), dtype=tf.float32
-            ),
-        )
-        scores = model(batch, training=False)
-        class_ids = tf.argmax(scores, axis=1, output_type=tf.int32)
-        return {
-            "class_ids": class_ids,
-            "scores": scores,
-        }
-
-    return serve_bytes.get_concrete_function()
-
-
-def extract_serving_metadata(saved_model_path):
-    imported = tf.saved_model.load(saved_model_path)
-    serving_fn = imported.signatures["serving_default"]
-    input_signature = serving_fn.structured_input_signature[1]
-    input_name, input_tensor_spec = next(iter(input_signature.items()))
-    structured_outputs = serving_fn.structured_outputs
-
-    return {
-        "signature_key": "serving_default",
-        "input_key": input_name,
-        "input_tensor_name": input_tensor_spec.name,
-        "output_tensor_names": {
-            output_name: tensor.name
-            for output_name, tensor in structured_outputs.items()
-        },
-    }
-
-
-def export_serving_artifacts(model, model_name, configs, keras_model_path):
-    saved_model_path = os.path.join(configs['saved_model_dir'], model_name)
-    if os.path.exists(saved_model_path):
-        shutil.rmtree(saved_model_path)
-
-    serving_signature = build_serving_signature(model, configs)
-    tf.saved_model.save(
-        model,
-        saved_model_path,
-        signatures={"serving_default": serving_signature},
-    )
-
-    manifest = {
-        "default_model": model_name,
-        "keras_model_path": keras_model_path,
-        "saved_model_path": saved_model_path,
-        "labels_path": configs['labels_path'],
-        "image_size": configs['image_size'],
-        "num_classes": configs['num_classes'],
-        "serving": extract_serving_metadata(saved_model_path),
-    }
-
-    with open(configs['manifest_path'], 'w', encoding='utf-8') as manifest_file:
-        json.dump(manifest, manifest_file, ensure_ascii=False, indent=2)
-
-    return manifest
+def set_random_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def build_training_config(
@@ -203,87 +46,279 @@ def build_training_config(
         configs["fine_tuning_epochs"] = fine_tuning_epochs
     if batch_size is not None:
         configs["batch_size"] = batch_size
-    configs["validation_freq"] = int(
-        configs.get("validation_frequency", configs.get("validation_freq", 1)) or 1
-    )
-    refresh_per_second = float(
-        configs.get(
-            "rich_progress_refresh_per_second",
-            configs.get("progress_refresh_seconds", 4),
-        )
-        or 4
-    )
+    refresh_per_second = float(configs.get("rich_progress_refresh_per_second", 4) or 4)
     configs["progress_refresh_seconds"] = 1 / max(refresh_per_second, 1.0)
     return configs
 
 
-def build_model_wrapper(model_name, image_size, num_classes):
-    model_class = MODEL_BUILDERS.get(model_name, ButterflyC)
-    return model_class((image_size, image_size, 3), num_classes=num_classes)
+def resolve_device(configs):
+    device_config = str(configs.get("device", "auto")).lower()
+    if device_config == "cpu":
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
 
 
-def fit_stage(model, dataset_bundle, epochs, callbacks, validation_freq):
-    if epochs <= 0:
-        return None
+def resolve_amp_dtype(configs, device):
+    precision = str(configs.get("precision", "float32")).lower()
+    if device.type != "cuda":
+        return None, "float32"
 
-    return model.fit(
-        dataset_bundle.train_data,
-        epochs=epochs,
-        validation_data=dataset_bundle.val_data,
-        validation_freq=validation_freq,
-        callbacks=callbacks,
-        verbose=0,
+    if precision in {"bf16", "bfloat16"} and torch.cuda.is_bf16_supported():
+        return torch.bfloat16, "bfloat16"
+    if precision in {"fp16", "float16"}:
+        return torch.float16, "float16"
+    return None, "float32"
+
+
+def configure_runtime(configs):
+    seed = int(configs.get("seed", 42) or 42)
+    set_random_seed(seed)
+
+    matmul_precision = str(configs.get("torch_matmul_precision", "high"))
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision(matmul_precision)
+
+    device = resolve_device(configs)
+    amp_dtype, precision_label = resolve_amp_dtype(configs, device)
+    channels_last = bool(configs.get("torch_channels_last", True))
+    compile_enabled = bool(configs.get("torch_compile", False))
+
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        device_names = [torch.cuda.get_device_name(device)]
+    else:
+        device_names = []
+
+    runtime = RuntimeSummary(
+        backend="torch",
+        device_type=device.type.upper(),
+        device_names=device_names,
+        precision=precision_label,
+        channels_last=channels_last,
+        compile_enabled=compile_enabled,
+        num_workers=int(configs.get("torch_num_workers", 0) or 0),
+        pin_memory=bool(configs.get("torch_pin_memory", True)),
+    )
+    return device, amp_dtype, runtime
+
+
+def build_optimizer(model, learning_rate, weight_decay):
+    return AdamW(
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
+        lr=learning_rate,
+        weight_decay=weight_decay,
     )
 
 
-def build_callbacks(configs, monitor, stage_key, stage_name, epochs, dataset_bundle):
-    monitor_metric = 'val_loss' if configs['validation_freq'] == 1 else 'loss'
-    reduce_lr = ReduceLROnPlateau(
-        monitor=monitor_metric,
-        factor=0.8,
-        patience=5,
-        min_lr=0.00005,
+def build_loss(configs):
+    return nn.CrossEntropyLoss(
+        label_smoothing=float(configs.get("label_smoothing", 0.0) or 0.0)
     )
-    checkpoint = ModelCheckpoint(
-        os.path.join(configs['model_path'], 'checkpoint.keras'),
-        monitor=monitor_metric,
-        save_best_only=True,
-    )
-    csv_logger = CSVLogger(
-        os.path.join(configs['log_dir'], f'{stage_key}.csv'),
-        append=False,
-    )
-    progress_callback = monitor.build_progress_callback(
-        stage_name=stage_name,
-        total_epochs=epochs,
-        train_steps=dataset_bundle.train_steps,
-        refresh_seconds=configs['progress_refresh_seconds'],
-    )
-    terminate_on_nan = TerminateOnNaN()
-    return [
-        reduce_lr,
-        checkpoint,
-        csv_logger,
-        progress_callback,
-        terminate_on_nan,
-    ]
 
 
-def compile_model(model, learning_rate):
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-        loss='categorical_crossentropy',
-        metrics=['accuracy'],
-        jit_compile=False,
-    )
+def build_stage_paths(configs, stage_key):
+    csv_log_path = os.path.join(configs["log_dir"], f"{stage_key}.csv")
+    checkpoint_path = os.path.join(configs["model_path"], "checkpoint.pt")
+    return csv_log_path, checkpoint_path
+
+
+def append_metrics_row(csv_path, row):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    file_exists = os.path.exists(csv_path)
+
+    with open(csv_path, "a", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=list(row.keys()))
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def save_model_payload(
+    model,
+    path,
+    *,
+    model_name,
+    class_names,
+    image_size,
+    metrics=None,
+    epoch=None,
+):
+    model_to_save = getattr(model, "_orig_mod", model)
+    payload = {
+        "backend": "torch",
+        "model_name": model_name,
+        "num_classes": len(class_names),
+        "class_names": list(class_names),
+        "image_size": image_size,
+        "state_dict": model_to_save.state_dict(),
+        "metrics": metrics or {},
+        "epoch": epoch,
+    }
+    torch.save(payload, path)
+
+
+def write_training_manifest(configs, *, model_name, final_model_path, checkpoint_path, class_names):
+    manifest = {
+        "backend": "torch",
+        "default_model": model_name,
+        "torch_model_path": final_model_path,
+        "checkpoint_path": checkpoint_path,
+        "labels_path": configs["labels_path"],
+        "image_size": configs["image_size"],
+        "num_classes": len(class_names),
+        "class_names": list(class_names),
+    }
+    with open(configs["manifest_path"], "w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, ensure_ascii=False, indent=2)
+    return manifest
+
+
+def maybe_channels_last(model, channels_last):
+    if channels_last:
+        return model.to(memory_format=torch.channels_last)
+    return model
+
+
+def compile_model_if_needed(model, configs):
+    if not bool(configs.get("torch_compile", False)):
+        return model
+    if not hasattr(torch, "compile"):
+        return model
+    mode = str(configs.get("torch_compile_mode", "default"))
+    return torch.compile(model, mode=mode)
+
+
+def train_one_epoch(
+    model,
+    loader,
+    *,
+    device,
+    criterion,
+    optimizer,
+    scaler,
+    amp_dtype,
+    channels_last,
+    progress,
+):
+    model.train()
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+    amp_enabled = device.type == "cuda" and amp_dtype is not None
+    running_loss = 0.0
+    running_correct = 0
+    running_samples = 0
+
+    for images, labels in loader:
+        images, labels = move_batch_to_device(
+            images,
+            labels,
+            device,
+            channels_last=channels_last,
+        )
+        optimizer.zero_grad(set_to_none=True)
+
+        autocast_kwargs = {
+            "device_type": device.type,
+            "enabled": amp_enabled,
+        }
+        if amp_dtype is not None:
+            autocast_kwargs["dtype"] = amp_dtype
+
+        with torch.autocast(**autocast_kwargs):
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+        if scaler.is_enabled():
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+
+        batch_size = labels.size(0)
+        predictions = outputs.argmax(dim=1)
+        correct = (predictions == labels).sum().item()
+
+        total_loss += loss.item() * batch_size
+        total_correct += correct
+        total_samples += batch_size
+        running_loss += loss.item() * batch_size
+        running_correct += correct
+        running_samples += batch_size
+
+        progress.update_step(
+            loss=running_loss / max(1, running_samples),
+            accuracy=running_correct / max(1, running_samples),
+            learning_rate=optimizer.param_groups[0]["lr"],
+        )
+
+    return {
+        "loss": total_loss / max(1, total_samples),
+        "accuracy": total_correct / max(1, total_samples),
+    }
+
+
+@torch.no_grad()
+def evaluate(
+    model,
+    loader,
+    *,
+    device,
+    criterion,
+    amp_dtype,
+    channels_last,
+):
+    model.eval()
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+    amp_enabled = device.type == "cuda" and amp_dtype is not None
+
+    for images, labels in loader:
+        images, labels = move_batch_to_device(
+            images,
+            labels,
+            device,
+            channels_last=channels_last,
+        )
+        autocast_kwargs = {
+            "device_type": device.type,
+            "enabled": amp_enabled,
+        }
+        if amp_dtype is not None:
+            autocast_kwargs["dtype"] = amp_dtype
+
+        with torch.autocast(**autocast_kwargs):
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+        batch_size = labels.size(0)
+        predictions = outputs.argmax(dim=1)
+        total_loss += loss.item() * batch_size
+        total_correct += (predictions == labels).sum().item()
+        total_samples += batch_size
+
+    return {
+        "loss": total_loss / max(1, total_samples),
+        "accuracy": total_correct / max(1, total_samples),
+    }
 
 
 def run_training_stage(
     *,
     model,
+    model_name,
     dataset_bundle,
     configs,
     monitor,
+    device,
+    amp_dtype,
     stage_key,
     stage_name,
     epochs,
@@ -291,43 +326,132 @@ def run_training_stage(
 ):
     if epochs <= 0:
         monitor.log_skip(stage_name, "epoch 数为 0")
-        return None
+        return {
+            "best_val_loss": None,
+            "best_val_accuracy": None,
+            "last_metrics": {},
+        }
 
-    compile_model(model, learning_rate)
-    callbacks = build_callbacks(
-        configs,
-        monitor,
-        stage_key,
-        stage_name,
-        epochs,
-        dataset_bundle,
-    )
+    csv_log_path, checkpoint_path = build_stage_paths(configs, stage_key)
     monitor.log_stage_start(
         stage_name=stage_name,
         epochs=epochs,
         learning_rate=learning_rate,
         dataset_bundle=dataset_bundle,
         trainable_params=count_trainable_parameters(model),
+        csv_log_path=csv_log_path,
+        checkpoint_path=checkpoint_path,
     )
-    stage_started_at = time.perf_counter()
-    history = fit_stage(
+
+    optimizer = build_optimizer(
         model,
-        dataset_bundle,
-        epochs,
-        callbacks,
-        configs['validation_freq'],
+        learning_rate=learning_rate,
+        weight_decay=float(configs.get("weight_decay", 1e-4) or 1e-4),
     )
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.8,
+        patience=5,
+        min_lr=float(configs.get("min_learning_rate", 5e-5) or 5e-5),
+    )
+    criterion = build_loss(configs)
+    scaler = GradScaler(
+        enabled=device.type == "cuda" and amp_dtype == torch.float16
+    )
+    progress = monitor.build_stage_progress(
+        stage_name=stage_name,
+        total_epochs=epochs,
+        train_steps=dataset_bundle.train_steps,
+        refresh_seconds=configs["progress_refresh_seconds"],
+    )
+    progress.start()
+
+    best_val_loss = float("inf")
+    best_val_accuracy = 0.0
+    last_metrics = {}
+    stage_started_at = time.perf_counter()
+    channels_last = bool(configs.get("torch_channels_last", True))
+
+    try:
+        for epoch in range(1, epochs + 1):
+            progress.start_epoch(epoch, optimizer.param_groups[0]["lr"])
+            train_metrics = train_one_epoch(
+                model,
+                dataset_bundle.train_loader,
+                device=device,
+                criterion=criterion,
+                optimizer=optimizer,
+                scaler=scaler,
+                amp_dtype=amp_dtype,
+                channels_last=channels_last,
+                progress=progress,
+            )
+            val_metrics = evaluate(
+                model,
+                dataset_bundle.val_loader,
+                device=device,
+                criterion=criterion,
+                amp_dtype=amp_dtype,
+                channels_last=channels_last,
+            )
+            scheduler.step(val_metrics["loss"])
+
+            last_metrics = {
+                "train_loss": train_metrics["loss"],
+                "train_accuracy": train_metrics["accuracy"],
+                "val_loss": val_metrics["loss"],
+                "val_accuracy": val_metrics["accuracy"],
+                "learning_rate": optimizer.param_groups[0]["lr"],
+            }
+            epoch_duration = progress.end_epoch(last_metrics)
+            monitor.log_epoch(
+                stage_name=stage_name,
+                epoch=epoch,
+                total_epochs=epochs,
+                metrics=last_metrics,
+                duration=epoch_duration,
+            )
+            append_metrics_row(
+                csv_log_path,
+                {
+                    "epoch": epoch,
+                    **last_metrics,
+                },
+            )
+
+            if val_metrics["loss"] < best_val_loss:
+                best_val_loss = val_metrics["loss"]
+                best_val_accuracy = val_metrics["accuracy"]
+                save_model_payload(
+                    model,
+                    checkpoint_path,
+                    model_name=model_name,
+                    class_names=dataset_bundle.class_names,
+                    image_size=configs["image_size"],
+                    metrics=last_metrics,
+                    epoch=epoch,
+                )
+    finally:
+        progress.stop()
+
     monitor.log_stage_end(
         stage_name,
-        history,
-        model,
+        {
+            "best_val_loss": best_val_loss if best_val_loss != float("inf") else None,
+            "best_val_accuracy": best_val_accuracy,
+        },
         elapsed_seconds=time.perf_counter() - stage_started_at,
     )
-    return history
+    return {
+        "best_val_loss": best_val_loss if best_val_loss != float("inf") else None,
+        "best_val_accuracy": best_val_accuracy,
+        "last_metrics": last_metrics,
+    }
 
 
 def train(
-    model_name='ButterflyC',
+    model_name="ButterflyC",
     *,
     initial_epochs=None,
     fine_tuning_epochs=None,
@@ -340,26 +464,33 @@ def train(
         fine_tuning_epochs=fine_tuning_epochs,
         batch_size=batch_size,
     )
-    runtime_summary = configure_runtime(configs)
-    n = configs['num_classes']
-    size = configs['image_size']
-    resolved_model_name = model_name if model_name in MODEL_BUILDERS else "ButterflyC"
-    monitor = TrainingMonitor(configs['log_dir'], resolved_model_name)
-    if model_name != resolved_model_name:
+    device, amp_dtype, runtime_summary = configure_runtime(configs)
+    resolved_model_name = normalize_model_name(model_name)
+    monitor = TrainingMonitor(configs["log_dir"], resolved_model_name)
+    if resolved_model_name != model_name:
         monitor.logger.info(
             "未识别的模型名 %s，回退到 %s。",
             model_name,
             resolved_model_name,
         )
 
-    label_encoder = export_label_artifacts(configs['train_csv'], configs['labels_path'])
+    label_encoder = export_label_artifacts(configs["train_csv"], configs["labels_path"])
     dataset_bundle = load_data(
         configs=configs,
         sample_limit=sample_limit,
         label_encoder=label_encoder,
     )
-    butterfly_model = build_model_wrapper(resolved_model_name, size, n)
-    model = butterfly_model.build_model()
+
+    resolved_model_name, model, head_parameters = build_torch_model(
+        resolved_model_name,
+        num_classes=len(dataset_bundle.class_names),
+        pretrained=True,
+    )
+    freeze_backbone(model, head_parameters)
+    model = model.to(device)
+    model = maybe_channels_last(model, runtime_summary.channels_last)
+    model = compile_model_if_needed(model, configs)
+
     monitor.show_training_plan(
         model_name=resolved_model_name,
         configs=configs,
@@ -368,59 +499,88 @@ def train(
         sample_limit=sample_limit,
         skip_fine_tuning=skip_fine_tuning,
     )
-    if not dataset_bundle.stratified_split:
-        monitor.logger.info("当前数据切分未使用分层抽样。")
-    if sample_limit is not None:
-        monitor.logger.info("当前运行启用了 sample_limit=%s。", sample_limit)
 
-    history = run_training_stage(
+    initial_result = run_training_stage(
         model=model,
+        model_name=resolved_model_name,
         dataset_bundle=dataset_bundle,
         configs=configs,
         monitor=monitor,
-        stage_key='initial_training',
-        stage_name='初始训练',
-        epochs=configs['initial_epochs'],
-        learning_rate=configs['learning_rate'],
+        device=device,
+        amp_dtype=amp_dtype,
+        stage_key="initial_training",
+        stage_name="初始训练",
+        epochs=int(configs["initial_epochs"]),
+        learning_rate=float(configs["learning_rate"]),
     )
+
     init_model_path = os.path.join(
-        configs['model_path'],
-        f'{resolved_model_name}-init.keras',
+        configs["model_path"],
+        f"{resolved_model_name}-init.pt",
     )
-    model.save(init_model_path)
+    save_model_payload(
+        model,
+        init_model_path,
+        model_name=resolved_model_name,
+        class_names=dataset_bundle.class_names,
+        image_size=configs["image_size"],
+        metrics=initial_result["last_metrics"],
+        epoch=int(configs["initial_epochs"]),
+    )
     monitor.logger.info("已保存初始阶段模型: %s", init_model_path)
 
-    history_fine = None
-    if not skip_fine_tuning and configs["fine_tuning_epochs"] > 0:
-        model = butterfly_model.unfreeze_base_model(model)
-        history_fine = run_training_stage(
+    fine_result = {"best_val_loss": None, "best_val_accuracy": None, "last_metrics": {}}
+    if not skip_fine_tuning and int(configs["fine_tuning_epochs"]) > 0:
+        unfreeze_model(model)
+        fine_result = run_training_stage(
             model=model,
+            model_name=resolved_model_name,
             dataset_bundle=dataset_bundle,
             configs=configs,
             monitor=monitor,
-            stage_key='fine_tuning',
-            stage_name='微调训练',
-            epochs=configs['fine_tuning_epochs'],
-            learning_rate=configs['fine_tuning_learning_rate'],
+            device=device,
+            amp_dtype=amp_dtype,
+            stage_key="fine_tuning",
+            stage_name="微调训练",
+            epochs=int(configs["fine_tuning_epochs"]),
+            learning_rate=float(configs["fine_tuning_learning_rate"]),
         )
     else:
         monitor.log_skip("微调训练", "命令行跳过或 fine_tuning_epochs 为 0")
-    keras_model_path = os.path.join(configs['model_path'],f'{resolved_model_name}.keras')
-    model.save(keras_model_path)
-    monitor.logger.info("已保存最终 Keras 模型: %s", keras_model_path)
-    manifest = export_serving_artifacts(model, resolved_model_name, configs, keras_model_path)
-    monitor.log_artifacts(
-        keras_model_path=keras_model_path,
-        init_model_path=init_model_path,
-        manifest=manifest,
-        manifest_path=configs['manifest_path'],
+
+    final_model_path = os.path.join(
+        configs["model_path"],
+        f"{resolved_model_name}.pt",
     )
-    monitor.logger.info("训练完成，SavedModel 与清单文件已导出。")
-    return history, history_fine
+    save_model_payload(
+        model,
+        final_model_path,
+        model_name=resolved_model_name,
+        class_names=dataset_bundle.class_names,
+        image_size=configs["image_size"],
+        metrics=fine_result["last_metrics"] or initial_result["last_metrics"],
+        epoch=int(configs["initial_epochs"]) + int(configs["fine_tuning_epochs"]),
+    )
+    manifest = write_training_manifest(
+        configs,
+        model_name=resolved_model_name,
+        final_model_path=final_model_path,
+        checkpoint_path=os.path.join(configs["model_path"], "checkpoint.pt"),
+        class_names=dataset_bundle.class_names,
+    )
+    monitor.log_artifacts(
+        final_model_path=final_model_path,
+        init_model_path=init_model_path,
+        checkpoint_path=manifest["checkpoint_path"],
+        manifest_path=configs["manifest_path"],
+        labels_path=configs["labels_path"],
+    )
+    monitor.logger.info("训练完成，已写出 PyTorch 模型与清单文件。")
+    return initial_result, fine_result
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train ButterflyC models.")
+    parser = argparse.ArgumentParser(description="Train ButterflyC models with PyTorch.")
     parser.add_argument("--model-name", default="ButterflyC")
     parser.add_argument("--initial-epochs", type=int, default=None)
     parser.add_argument("--fine-tuning-epochs", type=int, default=None)

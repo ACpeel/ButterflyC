@@ -1,8 +1,14 @@
 
+--extra-index-url https://download.pytorch.org/whl/cu128
+
 Flask
 kagglehub
 tensorflow[and-cuda] ; platform_system == "Linux" and platform_machine == "x86_64"
 tensorflow ; platform_system != "Linux" or platform_machine != "x86_64"
+torch ; platform_system == "Linux" and platform_machine == "x86_64"
+torchvision ; platform_system == "Linux" and platform_machine == "x86_64"
+torch ; platform_system != "Linux" or platform_machine != "x86_64"
+torchvision ; platform_system != "Linux" or platform_machine != "x86_64"
 scikit-learn
 numpy
 pyyaml
