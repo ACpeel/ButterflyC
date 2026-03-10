@@ -31,8 +31,8 @@ def parse_args():
     parser.add_argument(
         "--opset",
         type=int,
-        default=17,
-        help="ONNX opset version (default: 17).",
+        default=18,
+        help="ONNX opset version (default: 18).",
     )
     parser.add_argument(
         "--add-softmax",
@@ -100,6 +100,13 @@ def export_to_onnx(args):
     )
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+    opset = int(args.opset or 18)
+    if opset < 18:
+        print(
+            "Requested opset < 18. Upgrading to opset 18 to avoid exporter version conversion."
+        )
+        opset = 18
+
     torch.onnx.export(
         model,
         dummy,
@@ -110,7 +117,7 @@ def export_to_onnx(args):
             "images": {0: "batch"},
             "probs" if args.add_softmax else "logits": {0: "batch"},
         },
-        opset_version=args.opset,
+        opset_version=opset,
     )
     print(f"Exported ONNX to {output_path}")
 
