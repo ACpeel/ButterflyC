@@ -21,7 +21,11 @@ elseif(TARGET Crow)
 elseif(TARGET crow)
     set(CROW_TARGET crow)
 else()
-    find_path(CROW_INCLUDE_DIR crow.h HINTS /usr/local/include /usr/include)
+    if(EXISTS "/usr/local/include/crow.h")
+        set(CROW_INCLUDE_DIR "/usr/local/include")
+    else()
+        find_path(CROW_INCLUDE_DIR crow.h HINTS /usr/local/include /usr/include)
+    endif()
     if(NOT CROW_INCLUDE_DIR)
         message(
             FATAL_ERROR

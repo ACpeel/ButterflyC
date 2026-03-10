@@ -40,9 +40,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopencv-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Crow header-only library.
-RUN curl -L -o /usr/local/include/crow.h \
-    https://raw.githubusercontent.com/CrowCpp/Crow/v1.0/include/crow.h
+# Crow header-only library (needs the full include tree, not just `crow.h`).
+ARG CROW_VERSION=v1.0
+RUN curl -L -o /tmp/crow.tgz \
+        https://github.com/CrowCpp/Crow/archive/refs/tags/${CROW_VERSION}.tar.gz \
+    && mkdir -p /tmp/crow-src \
+    && tar -C /tmp/crow-src --strip-components=1 -xzf /tmp/crow.tgz \
+    && cp -r /tmp/crow-src/include/crow /usr/local/include/ \
+    && cp /tmp/crow-src/include/crow.h /usr/local/include/ \
+    && rm -rf /tmp/crow.tgz /tmp/crow-src
 
 # ONNX Runtime (CPU). Change ORT_VERSION if needed.
 ARG ORT_VERSION=1.18.1
