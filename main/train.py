@@ -4,6 +4,7 @@ import json
 import os
 import random
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -56,6 +57,18 @@ def resolve_device(configs):
     if device_config == "cpu":
         return torch.device("cpu")
     if torch.cuda.is_available():
+        capability = torch.cuda.get_device_capability()
+        capability_score = capability[0] * 10 + capability[1]
+        min_capability = int(configs.get("min_cuda_capability", 70) or 70)
+        if capability_score < min_capability:
+            warnings.warn(
+                (
+                    f"当前 GPU 计算能力 sm_{capability_score} 低于已安装 PyTorch 支持的最低 "
+                    f"sm_{min_capability}，自动切换到 CPU。"
+                    " 如需使用该 GPU，请安装匹配架构的 PyTorch 轮子或在 config.yml 中将 device 设为 cpu。"
+                )
+            )
+            return torch.device("cpu")
         return torch.device("cuda")
     return torch.device("cpu")
 
