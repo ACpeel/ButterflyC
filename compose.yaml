@@ -6,6 +6,11 @@ services:
         HTTP_PROXY: ${HTTP_PROXY}
         HTTPS_PROXY: ${HTTPS_PROXY}
         NO_PROXY: ${NO_PROXY}
+        http_proxy: ${http_proxy}
+        https_proxy: ${https_proxy}
+        no_proxy: ${no_proxy}
+        ALL_PROXY: ${ALL_PROXY}
+        all_proxy: ${all_proxy}
     image: butterflyc-cpp:local
     container_name: butterflyc_cpp
     environment:
