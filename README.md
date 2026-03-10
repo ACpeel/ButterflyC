@@ -93,19 +93,23 @@ TensorFlow SavedModel 导出仍然要求已有 .keras
 
 #### Docker
 
-- 本地构建
+- 导出 ONNX
 
 ```bash
-cd ButterflyC
-docker build -t BC . -f docker/Dockerfile
-docker run -p 8090:8090 bc:latest
-# Warning 是正常的
+uv run python -m main.export_onnx --model-name ButterflyC
 ```
 
-- 浏览器打开
+- 启动 C++ 服务
 
 ```bash
-http://127.0.0.1:8090
+docker compose up --build
+```
+
+- 测试
+
+```bash
+curl -s http://127.0.0.1:8091/healthz
+curl -s -F "file=@/path/to/test.jpg" http://127.0.0.1:8091/ur
 ```
 
 

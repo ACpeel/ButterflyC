@@ -37,3 +37,4 @@ RUN cmake -S cpp -B build/cpp \
 
 EXPOSE 8091
 CMD ["./build/cpp/butterflyc_server"]
+

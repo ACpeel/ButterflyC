@@ -2,7 +2,6 @@ services:
   butterflyc_cpp:
     build:
       context: .
-      dockerfile: docker/Dockerfile.cpp
     image: butterflyc-cpp:local
     container_name: butterflyc_cpp
     environment:
