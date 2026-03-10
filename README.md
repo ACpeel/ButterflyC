@@ -2,20 +2,19 @@
 
 
 > 蝴蝶识别系统
-- 训练默认切到 PyTorch
+- 训练默认走 PyTorch（优先适配 RTX 5090）
 - 5090 推荐直接用 `uv`
-- 模型默认采用 EfficientNetB0
-- Flask 管理页面
-- C++ 基于 crow 和 asio 重构中
+- 默认模型：EfficientNetB0（模型名：`ButterflyC`）
+- Flask 管理页面（`8090`）
+- C++ 服务（Crow + ONNX Runtime，`8091`）
 
 
-> 训练链路现在优先适配 RTX 5090
-> 原 TensorFlow SavedModel / C++ 推理链路保留
-> 但训练默认已经不再走 TensorFlow
+> 推荐链路：
+> Torch 训练 -> 导出 ONNX -> 启动 C++ 服务
 
 
 
-#### Start Butterfly C
+#### Start Butterfly C (Flask)
 
 - 下载
 
@@ -24,23 +23,29 @@ git clone https://github.com/Chenpeel/ButterflyC.git
 cd ButterflyC
 ```
 
-- 依赖库
+- 安装依赖
 
 ```bash
 uv sync
 ```
 
-- 运行页面
+- 启动管理页面（默认端口 `8090`）
 
 ```bash
 uv run python app/app.py
 ```
 
+- 打开页面
+
+```bash
+http://127.0.0.1:8090
+```
 
 
-#### Train on 5090
 
-- 下载数据集
+#### Train on 5090 (Torch)
+
+- 下载数据集（默认落到 `data/`，训练时会自动同步到 `TEMP/data`）
 
 ```bash
 uv run python -m main.download_dataset
@@ -62,7 +67,7 @@ batch_size: 64
 precision: "bf16"
 ```
 
-- 训练产物
+- 训练产物（默认在 `main/models/`）
 
 ```bash
 main/models/ButterflyC-init.pt
@@ -74,24 +79,7 @@ main/models/model_manifest.json
 
 
 
-#### TensorFlow Export
-
-- 如果你已经有 `.keras` 模型
-
-```bash
-uv run python -m main.export_serving --model-name ButterflyC
-```
-
-- 说明
-
-```bash
-PyTorch 训练默认输出 .pt
-TensorFlow SavedModel 导出仍然要求已有 .keras
-```
-
-
-
-#### Docker
+#### Export ONNX (C++ 推理)
 
 - 导出 ONNX
 
@@ -99,7 +87,9 @@ TensorFlow SavedModel 导出仍然要求已有 .keras
 uv run python -m main.export_onnx --model-name ButterflyC
 ```
 
-- 启动 C++ 服务
+#### Docker (C++ Service)
+
+- 启动 C++ 服务（默认端口 `8091`）
 
 ```bash
 docker compose up --build
@@ -114,13 +104,15 @@ curl -s -F "file=@/path/to/test.jpg" http://127.0.0.1:8091/ur
 
 
 
-#### C++ Service
+#### C++ Service (本地编译)
 
 - 依赖
 
 ```bash
-需要先安装 Crow + ONNX Runtime + OpenCV
-或保证 CMake 能找到 CrowConfig.cmake / crow.h
+Crow
+ONNX Runtime
+OpenCV
+Boost.System + Threads
 ```
 
 - 构建
@@ -133,13 +125,7 @@ cmake --build build/cpp
 - 运行
 
 ```bash
-./build/cpp/butterflyc_server
-```
-
-- ONNX 导出
-
-```bash
-uv run python -m main.export_onnx --model-name ButterflyC
+PORT=8091 ./build/cpp/butterflyc_server
 ```
 
 
