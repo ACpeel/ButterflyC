@@ -107,18 +107,34 @@ def export_to_onnx(args):
         )
         opset = 18
 
+    output_name = "probs" if args.add_softmax else "logits"
     torch.onnx.export(
         model,
         dummy,
         output_path,
         input_names=["images"],
-        output_names=["probs" if args.add_softmax else "logits"],
+        output_names=[output_name],
         dynamic_axes={
             "images": {0: "batch"},
-            "probs" if args.add_softmax else "logits": {0: "batch"},
+            output_name: {0: "batch"},
         },
         opset_version=opset,
     )
+    manifest_path = configs.get("manifest_path", "")
+    if manifest_path:
+        merged = manifest or {}
+        merged.setdefault("backend", "torch")
+        merged.setdefault("default_model", resolved_name)
+        merged["onnx_model_path"] = output_path
+        merged["onnx_input_name"] = "images"
+        merged["onnx_output_names"] = [output_name]
+        merged["onnx_output_type"] = "probabilities" if args.add_softmax else "logits"
+        merged.setdefault("labels_path", configs.get("labels_path", "main/models/labels.json"))
+        merged.setdefault("image_size", image_size)
+        merged.setdefault("num_classes", num_classes)
+        with open(manifest_path, "w", encoding="utf-8") as file:
+            json.dump(merged, file, ensure_ascii=False, indent=2)
+        print(f"Updated manifest: {manifest_path}")
     print(f"Exported ONNX to {output_path}")
 
 

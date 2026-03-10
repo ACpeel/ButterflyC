@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
+find_package(OpenCV REQUIRED)
 find_package(Crow CONFIG QUIET)
 
 set(CROW_TARGET "")
@@ -29,18 +30,13 @@ else()
     endif()
 endif()
 
-find_path(TENSORFLOW_INCLUDE_DIR tensorflow/c/c_api.h HINTS /usr/local/include)
-find_library(TENSORFLOW_LIBRARY tensorflow HINTS /usr/local/lib)
-find_library(
-    TENSORFLOW_FRAMEWORK_LIBRARY
-    tensorflow_framework
-    HINTS /usr/local/lib
-)
+find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h HINTS /opt/onnxruntime/include /usr/local/include)
+find_library(ONNXRUNTIME_LIBRARY onnxruntime HINTS /opt/onnxruntime/lib /usr/local/lib)
 
-if(NOT TENSORFLOW_INCLUDE_DIR OR NOT TENSORFLOW_LIBRARY OR NOT TENSORFLOW_FRAMEWORK_LIBRARY)
+if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
     message(
         FATAL_ERROR
-        "TensorFlow C API not found. Install libtensorflow under /usr/local."
+        "ONNX Runtime not found. Install onnxruntime and set include/lib paths."
     )
 endif()
 
@@ -49,8 +45,9 @@ target_compile_definitions(butterflyc_server PRIVATE CROW_USE_BOOST=1)
 target_include_directories(
     butterflyc_server
     PRIVATE
-        ${TENSORFLOW_INCLUDE_DIR}
         ${CROW_INCLUDE_DIR}
+        ${ONNXRUNTIME_INCLUDE_DIR}
+        ${OpenCV_INCLUDE_DIRS}
 )
 target_link_libraries(
     butterflyc_server
@@ -58,6 +55,6 @@ target_link_libraries(
         ${CROW_TARGET}
         Boost::system
         Threads::Threads
-        ${TENSORFLOW_LIBRARY}
-        ${TENSORFLOW_FRAMEWORK_LIBRARY}
+        ${ONNXRUNTIME_LIBRARY}
+        ${OpenCV_LIBS}
 )

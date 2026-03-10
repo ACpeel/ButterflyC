@@ -115,7 +115,7 @@ http://127.0.0.1:8090
 - 依赖
 
 ```bash
-需要先安装 Crow
+需要先安装 Crow + ONNX Runtime + OpenCV
 或保证 CMake 能找到 CrowConfig.cmake / crow.h
 ```
 
@@ -130,6 +130,12 @@ cmake --build build/cpp
 
 ```bash
 ./build/cpp/butterflyc_server
+```
+
+- ONNX 导出
+
+```bash
+uv run python -m main.export_onnx --model-name ButterflyC
 ```
 
 

@@ -10,19 +10,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     pkg-config \
     libboost-system-dev \
+    libgomp1 \
+    libgl1 \
+    libopencv-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Crow header-only library.
 RUN curl -L -o /usr/local/include/crow.h \
     https://raw.githubusercontent.com/CrowCpp/Crow/v1.0/include/crow.h
 
-# TensorFlow C API (CPU). Change TF_VERSION if you need to match your SavedModel build.
-ARG TF_VERSION=2.18.0
-RUN curl -L -o /tmp/libtensorflow.tar.gz \
-    https://storage.googleapis.com/tensorflow/versions/${TF_VERSION}/libtensorflow-cpu-linux-x86_64.tar.gz \
-    && tar -C /usr/local -xzf /tmp/libtensorflow.tar.gz \
-    && ldconfig /usr/local/lib \
-    && rm /tmp/libtensorflow.tar.gz
+# ONNX Runtime (CPU). Change ORT_VERSION if needed.
+ARG ORT_VERSION=1.18.1
+RUN curl -L -o /tmp/onnxruntime.tgz \
+    https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz \
+    && mkdir -p /opt/onnxruntime \
+    && tar -C /opt/onnxruntime --strip-components=1 -xzf /tmp/onnxruntime.tgz \
+    && rm /tmp/onnxruntime.tgz
+
+ENV LD_LIBRARY_PATH="/opt/onnxruntime/lib:${LD_LIBRARY_PATH}"
 
 WORKDIR /app
 COPY . /app

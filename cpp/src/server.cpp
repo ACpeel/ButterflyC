@@ -1,5 +1,9 @@
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cctype>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -14,9 +18,9 @@
 
 #define CROW_STATIC_DIRECTORY "app/templates/static/"
 #include <crow.h>
-#include "tensorflow/c/c_api.h"
-#include "tensorflow/c/tf_tensor.h"
-#include "tensorflow/c/tf_tstring.h"
+#include <onnxruntime_cxx_api.h>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 namespace fs = std::filesystem;
 
@@ -36,11 +40,12 @@ public:
 };
 
 struct ServingMetadata {
-    fs::path saved_model_path;
+    fs::path onnx_model_path;
     fs::path labels_path;
-    std::string input_tensor_name;
-    std::string class_ids_tensor_name;
-    std::string scores_tensor_name;
+    int image_size = 224;
+    std::string input_name;
+    std::vector<std::string> output_names;
+    bool output_is_probabilities = false;
 };
 
 std::string ReadTextFile(const fs::path& file_path) {
@@ -176,34 +181,62 @@ crow::json::wvalue ErrorPayload(const std::string& message) {
     return payload;
 }
 
-std::string StripTensorPort(const std::string& tensor_name) {
-    const auto colon = tensor_name.rfind(':');
-    if (colon == std::string::npos) {
-        return tensor_name;
+std::vector<float> PreprocessImageBytes(const std::vector<char>& bytes, int image_size) {
+    cv::Mat buffer(1, static_cast<int>(bytes.size()), CV_8U, const_cast<char*>(bytes.data()));
+    cv::Mat image = cv::imdecode(buffer, cv::IMREAD_COLOR);
+    if (image.empty()) {
+        throw std::runtime_error("Failed to decode image bytes.");
     }
-    return tensor_name.substr(0, colon);
+    cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+    cv::resize(image, image, cv::Size(image_size, image_size));
+    image.convertTo(image, CV_32F, 1.0 / 255.0);
+
+    std::vector<cv::Mat> channels(3);
+    cv::split(image, channels);
+    const size_t plane_size = static_cast<size_t>(image_size) * image_size;
+    std::vector<float> chw(3 * plane_size);
+    for (int c = 0; c < 3; ++c) {
+        if (!channels[c].isContinuous()) {
+            channels[c] = channels[c].clone();
+        }
+        std::memcpy(
+            chw.data() + c * plane_size,
+            channels[c].data,
+            plane_size * sizeof(float)
+        );
+    }
+    return chw;
 }
 
-int TensorPort(const std::string& tensor_name) {
-    const auto colon = tensor_name.rfind(':');
-    if (colon == std::string::npos) {
-        return 0;
+std::vector<float> Softmax(const float* logits, size_t size) {
+    if (size == 0) {
+        return {};
     }
-    return std::stoi(tensor_name.substr(colon + 1));
+    const float max_logit = *std::max_element(logits, logits + size);
+    std::vector<float> probs(size);
+    float sum = 0.0F;
+    for (size_t i = 0; i < size; ++i) {
+        probs[i] = std::exp(logits[i] - max_logit);
+        sum += probs[i];
+    }
+    if (sum <= 0.0F) {
+        return probs;
+    }
+    for (size_t i = 0; i < size; ++i) {
+        probs[i] /= sum;
+    }
+    return probs;
 }
 
-class TensorFlowBackend final : public InferenceBackend {
+class OnnxBackend final : public InferenceBackend {
 public:
-    explicit TensorFlowBackend(const fs::path& repo_root)
+    explicit OnnxBackend(const fs::path& repo_root)
         : repo_root_(repo_root),
-          status_(TF_NewStatus()),
-          graph_(TF_NewGraph()),
-          session_options_(TF_NewSessionOptions()),
-          meta_graph_(TF_NewBuffer()) {
+          env_(ORT_LOGGING_LEVEL_WARNING, "butterflyc") {
         try {
             metadata_ = LoadMetadata();
             labels_ = LoadLabels(metadata_.labels_path);
-            LoadSavedModel();
+            LoadSession();
             ready_ = true;
         } catch (const std::exception& error) {
             ready_ = false;
@@ -211,24 +244,7 @@ public:
         }
     }
 
-    ~TensorFlowBackend() override {
-        if (session_ != nullptr) {
-            TF_CloseSession(session_, status_);
-            TF_DeleteSession(session_, status_);
-        }
-        if (meta_graph_ != nullptr) {
-            TF_DeleteBuffer(meta_graph_);
-        }
-        if (session_options_ != nullptr) {
-            TF_DeleteSessionOptions(session_options_);
-        }
-        if (graph_ != nullptr) {
-            TF_DeleteGraph(graph_);
-        }
-        if (status_ != nullptr) {
-            TF_DeleteStatus(status_);
-        }
-    }
+    ~OnnxBackend() override = default;
 
     InferenceResult Predict(const fs::path& image_path) override {
         if (!ready_) {
@@ -236,62 +252,73 @@ public:
                 false,
                 "",
                 0.0F,
-                startup_error_.empty() ? "TensorFlow backend is not ready." : startup_error_,
+                startup_error_.empty() ? "ONNX backend is not ready." : startup_error_,
             };
         }
 
         try {
             const std::vector<char> image_bytes = ReadBinaryFile(image_path);
-            std::unique_ptr<TF_Tensor, decltype(&TF_DeleteTensor)> input_tensor(
-                CreateStringTensor(image_bytes),
-                TF_DeleteTensor
+            std::vector<float> input = PreprocessImageBytes(
+                image_bytes,
+                metadata_.image_size
+            );
+            const std::array<int64_t, 4> input_shape = {
+                1,
+                3,
+                metadata_.image_size,
+                metadata_.image_size,
+            };
+            Ort::MemoryInfo memory_info =
+                Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+                memory_info,
+                input.data(),
+                input.size(),
+                input_shape.data(),
+                input_shape.size()
             );
 
-            TF_Tensor* output_tensors[2] = {nullptr, nullptr};
-            TF_Tensor* input_tensors[1] = {input_tensor.get()};
-            TF_Output inputs[1] = {input_};
-            TF_Output outputs[2] = {class_ids_output_, scores_output_};
-
-            {
-                std::lock_guard<std::mutex> lock(session_mutex_);
-                TF_SessionRun(
-                    session_,
-                    nullptr,
-                    inputs,
-                    input_tensors,
-                    1,
-                    outputs,
-                    output_tensors,
-                    2,
-                    nullptr,
-                    0,
-                    nullptr,
-                    status_
-                );
-                CheckStatus("TF_SessionRun");
+            const char* input_name = input_name_.c_str();
+            std::vector<const char*> output_names;
+            output_names.reserve(output_names_.size());
+            for (const auto& name : output_names_) {
+                output_names.push_back(name.c_str());
             }
 
-            std::unique_ptr<TF_Tensor, decltype(&TF_DeleteTensor)> class_ids_tensor(
-                output_tensors[0],
-                TF_DeleteTensor
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            auto outputs = session_.Run(
+                Ort::RunOptions{nullptr},
+                &input_name,
+                &input_tensor,
+                1,
+                output_names.data(),
+                output_names.size()
             );
-            std::unique_ptr<TF_Tensor, decltype(&TF_DeleteTensor)> scores_tensor(
-                output_tensors[1],
-                TF_DeleteTensor
-            );
-
-            const auto* class_ids =
-                static_cast<const int32_t*>(TF_TensorData(class_ids_tensor.get()));
-            const auto* scores =
-                static_cast<const float*>(TF_TensorData(scores_tensor.get()));
-
-            const int class_id = class_ids[0];
-            if (class_id < 0 || static_cast<size_t>(class_id) >= labels_.size()) {
-                throw std::runtime_error("Predicted class id is out of label range.");
+            if (outputs.empty()) {
+                throw std::runtime_error("ONNX inference returned no outputs.");
             }
 
-            const float confidence = scores[class_id];
-            return {true, labels_[class_id], confidence, ""};
+            const float* scores = outputs[0].GetTensorData<float>();
+            const size_t num_classes = labels_.size();
+            if (num_classes == 0) {
+                throw std::runtime_error("Labels list is empty.");
+            }
+
+            size_t best_index = 0;
+            float best_value = scores[0];
+            for (size_t i = 1; i < num_classes; ++i) {
+                if (scores[i] > best_value) {
+                    best_value = scores[i];
+                    best_index = i;
+                }
+            }
+
+            float confidence = best_value;
+            if (!metadata_.output_is_probabilities) {
+                const auto probs = Softmax(scores, num_classes);
+                confidence = probs[best_index];
+            }
+            return {true, labels_[best_index], confidence, ""};
         } catch (const std::exception& error) {
             return {false, "", 0.0F, error.what()};
         }
@@ -302,7 +329,7 @@ private:
         const fs::path manifest_path = repo_root_ / "main" / "models" / "model_manifest.json";
         if (!fs::exists(manifest_path)) {
             throw std::runtime_error(
-                "Model manifest not found. Run `python -m main.export_serving --model-name ButterflyC` first."
+                "Model manifest not found. Run `python -m main.export_onnx --model-name ButterflyC` first."
             );
         }
 
@@ -310,17 +337,39 @@ private:
         if (!manifest_json) {
             throw std::runtime_error("Failed to parse model manifest JSON.");
         }
-
-        const auto serving = manifest_json["serving"];
-        const auto output_tensor_names = serving["output_tensor_names"];
-
-        return {
-            ResolveRepoPath(repo_root_, std::string(manifest_json["saved_model_path"].s())),
-            ResolveRepoPath(repo_root_, std::string(manifest_json["labels_path"].s())),
-            std::string(serving["input_tensor_name"].s()),
-            std::string(output_tensor_names["class_ids"].s()),
-            std::string(output_tensor_names["scores"].s()),
-        };
+        ServingMetadata metadata;
+        if (manifest_json.has("onnx_model_path")) {
+            metadata.onnx_model_path =
+                ResolveRepoPath(repo_root_, std::string(manifest_json["onnx_model_path"].s()));
+        } else {
+            std::string model_name = "ButterflyC";
+            if (manifest_json.has("default_model")) {
+                model_name = std::string(manifest_json["default_model"].s());
+            }
+            metadata.onnx_model_path =
+                repo_root_ / "main" / "models" / (model_name + ".onnx");
+        }
+        metadata.labels_path =
+            ResolveRepoPath(repo_root_, std::string(manifest_json["labels_path"].s()));
+        if (manifest_json.has("image_size")) {
+            metadata.image_size = manifest_json["image_size"].i();
+        }
+        if (manifest_json.has("onnx_input_name")) {
+            metadata.input_name = std::string(manifest_json["onnx_input_name"].s());
+        }
+        if (manifest_json.has("onnx_output_names")) {
+            const auto outputs = manifest_json["onnx_output_names"];
+            metadata.output_names.reserve(outputs.size());
+            for (size_t i = 0; i < outputs.size(); ++i) {
+                metadata.output_names.emplace_back(std::string(outputs[i].s()));
+            }
+        }
+        if (manifest_json.has("onnx_output_type")) {
+            const std::string output_type =
+                std::string(manifest_json["onnx_output_type"].s());
+            metadata.output_is_probabilities = (output_type == "probabilities");
+        }
+        return metadata;
     }
 
     std::vector<std::string> LoadLabels(const fs::path& labels_path) const {
@@ -341,55 +390,33 @@ private:
         return labels;
     }
 
-    void LoadSavedModel() {
-        const char* tags[] = {"serve"};
-        session_ = TF_LoadSessionFromSavedModel(
-            session_options_,
-            nullptr,
-            metadata_.saved_model_path.string().c_str(),
-            tags,
-            1,
-            graph_,
-            meta_graph_,
-            status_
-        );
-        CheckStatus("TF_LoadSessionFromSavedModel");
-        if (session_ == nullptr) {
-            throw std::runtime_error("TensorFlow session was not created.");
+    void LoadSession() {
+        if (!fs::exists(metadata_.onnx_model_path)) {
+            throw std::runtime_error(
+                "ONNX model not found: " + metadata_.onnx_model_path.string()
+            );
         }
+        session_options_.SetIntraOpNumThreads(1);
+        session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+        session_ = Ort::Session(env_, metadata_.onnx_model_path.c_str(), session_options_);
 
-        input_ = ResolveOutput(metadata_.input_tensor_name);
-        class_ids_output_ = ResolveOutput(metadata_.class_ids_tensor_name);
-        scores_output_ = ResolveOutput(metadata_.scores_tensor_name);
-    }
-
-    TF_Output ResolveOutput(const std::string& tensor_name) {
-        TF_Operation* operation =
-            TF_GraphOperationByName(graph_, StripTensorPort(tensor_name).c_str());
-        if (operation == nullptr) {
-            throw std::runtime_error("TensorFlow graph operation not found: " + tensor_name);
+        if (metadata_.input_name.empty()) {
+            auto input_name = session_.GetInputNameAllocated(0, allocator_);
+            input_name_ = input_name.get();
+        } else {
+            input_name_ = metadata_.input_name;
         }
-
-        return TF_Output{operation, TensorPort(tensor_name)};
-    }
-
-    TF_Tensor* CreateStringTensor(const std::vector<char>& value) const {
-        const int64_t dims[] = {1};
-        TF_Tensor* tensor =
-            TF_AllocateTensor(TF_STRING, dims, 1, sizeof(TF_TString));
-        if (tensor == nullptr) {
-            throw std::runtime_error("Failed to allocate TF_STRING tensor.");
-        }
-
-        auto* tensor_data = static_cast<TF_TString*>(TF_TensorData(tensor));
-        TF_StringInit(&tensor_data[0]);
-        TF_StringCopy(&tensor_data[0], value.data(), value.size());
-        return tensor;
-    }
-
-    void CheckStatus(const std::string& action) const {
-        if (TF_GetCode(status_) != TF_OK) {
-            throw std::runtime_error(action + ": " + TF_Message(status_));
+        if (metadata_.output_names.empty()) {
+            const size_t output_count = session_.GetOutputCount();
+            if (output_count == 0) {
+                throw std::runtime_error("ONNX model has no outputs.");
+            }
+            for (size_t i = 0; i < output_count; ++i) {
+                auto output_name = session_.GetOutputNameAllocated(i, allocator_);
+                output_names_.emplace_back(output_name.get());
+            }
+        } else {
+            output_names_ = metadata_.output_names;
         }
     }
 
@@ -398,14 +425,12 @@ private:
     std::string startup_error_;
     ServingMetadata metadata_;
     std::vector<std::string> labels_;
-    TF_Status* status_ = nullptr;
-    TF_Graph* graph_ = nullptr;
-    TF_SessionOptions* session_options_ = nullptr;
-    TF_Buffer* meta_graph_ = nullptr;
-    TF_Session* session_ = nullptr;
-    TF_Output input_{};
-    TF_Output class_ids_output_{};
-    TF_Output scores_output_{};
+    Ort::Env env_;
+    Ort::SessionOptions session_options_;
+    Ort::Session session_{nullptr};
+    Ort::AllocatorWithDefaultOptions allocator_;
+    std::string input_name_;
+    std::vector<std::string> output_names_;
     std::mutex session_mutex_;
 };
 
@@ -417,7 +442,7 @@ int main() {
     const fs::path upload_dir = repo_root / "app" / "upload";
     fs::create_directories(upload_dir);
 
-    TensorFlowBackend backend(repo_root);
+    OnnxBackend backend(repo_root);
     crow::SimpleApp app;
 
     CROW_ROUTE(app, "/healthz")([] {
