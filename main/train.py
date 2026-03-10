@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 import torch
 from torch import nn
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -103,6 +103,10 @@ def configure_runtime(configs):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         device_names = [torch.cuda.get_device_name(device)]
+        capability = torch.cuda.get_device_capability(device)
+        capability_score = capability[0] * 10 + capability[1]
+        if capability_score < int(configs.get("min_cuda_capability", 70) or 70):
+            channels_last = False
     else:
         device_names = []
 
@@ -370,7 +374,8 @@ def run_training_stage(
     )
     criterion = build_loss(configs)
     scaler = GradScaler(
-        enabled=device.type == "cuda" and amp_dtype == torch.float16
+        device=(device.type if device.type in {"cuda", "cpu"} else "cpu"),
+        enabled=(device.type == "cuda" and amp_dtype == torch.float16),
     )
     progress = monitor.build_stage_progress(
         stage_name=stage_name,
