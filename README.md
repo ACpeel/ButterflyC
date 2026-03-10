@@ -112,6 +112,13 @@ http://127.0.0.1:8090
 
 #### C++ Service
 
+- 依赖
+
+```bash
+需要先安装 Crow
+或保证 CMake 能找到 CrowConfig.cmake / crow.h
+```
+
 - 构建
 
 ```bash

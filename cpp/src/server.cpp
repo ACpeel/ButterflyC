@@ -13,7 +13,7 @@
 #include <vector>
 
 #define CROW_STATIC_DIRECTORY "app/templates/static/"
-#include "crow_all.h"
+#include <crow.h>
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/c/tf_tensor.h"
 #include "tensorflow/c/tf_tstring.h"

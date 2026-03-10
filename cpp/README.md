@@ -1,10 +1,15 @@
 # C++ Service Skeleton
 
 This directory contains the native web service skeleton that will replace the
-current Flask routes. It already compiles with Crow plus Boost.Asio and keeps
-the upload and static-file route layout aligned with the Python app.
+current Flask routes. It now depends on an installed Crow package or `crow.h`
+available in your compiler include path, and keeps the upload and static-file
+route layout aligned with the Python app.
 
 ## Build
+
+Make sure Crow and Boost are available to CMake first. `cpp/CMakeLists.txt`
+will use `CrowConfig.cmake` when present, or fall back to a plain `crow.h`
+header lookup.
 
 ```bash
 cmake -S cpp -B build/cpp

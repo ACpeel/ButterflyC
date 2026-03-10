@@ -7,6 +7,28 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
+find_package(Boost REQUIRED COMPONENTS system)
+find_package(Crow CONFIG QUIET)
+
+set(CROW_TARGET "")
+set(CROW_INCLUDE_DIR "")
+
+if(TARGET Crow::Crow)
+    set(CROW_TARGET Crow::Crow)
+elseif(TARGET Crow)
+    set(CROW_TARGET Crow)
+elseif(TARGET crow)
+    set(CROW_TARGET crow)
+else()
+    find_path(CROW_INCLUDE_DIR crow.h)
+    if(NOT CROW_INCLUDE_DIR)
+        message(
+            FATAL_ERROR
+            "Crow headers not found. Install Crow or provide CrowConfig.cmake before building cpp/."
+        )
+    endif()
+endif()
+
 find_path(TENSORFLOW_INCLUDE_DIR tensorflow/c/c_api.h HINTS /usr/local/include)
 find_library(TENSORFLOW_LIBRARY tensorflow HINTS /usr/local/lib)
 find_library(
@@ -15,8 +37,11 @@ find_library(
     HINTS /usr/local/lib
 )
 
-if(NOT TENSORFLOW_INCLUDE_DIR OR NOT TENSORFLOW_LIBRARY)
-    message(FATAL_ERROR "TensorFlow C API not found. Install libtensorflow under /usr/local.")
+if(NOT TENSORFLOW_INCLUDE_DIR OR NOT TENSORFLOW_LIBRARY OR NOT TENSORFLOW_FRAMEWORK_LIBRARY)
+    message(
+        FATAL_ERROR
+        "TensorFlow C API not found. Install libtensorflow under /usr/local."
+    )
 endif()
 
 add_executable(butterflyc_server src/server.cpp)
@@ -24,17 +49,14 @@ target_compile_definitions(butterflyc_server PRIVATE CROW_USE_BOOST=1)
 target_include_directories(
     butterflyc_server
     PRIVATE
-        ${PROJECT_SOURCE_DIR}/../app
         ${TENSORFLOW_INCLUDE_DIR}
-)
-target_link_directories(
-    butterflyc_server
-    PRIVATE
-        /usr/local/lib
+        ${CROW_INCLUDE_DIR}
 )
 target_link_libraries(
     butterflyc_server
     PRIVATE
+        ${CROW_TARGET}
+        Boost::system
         Threads::Threads
         ${TENSORFLOW_LIBRARY}
         ${TENSORFLOW_FRAMEWORK_LIBRARY}
