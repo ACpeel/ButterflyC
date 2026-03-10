@@ -21,6 +21,8 @@ dependencies = [
     "matplotlib>=3.9,<4",
     "opencv-python>=4.10,<5",
     "imbalanced-learn>=0.13,<0.15",
+    "onnx>=1.16,<2",
+    "onnxscript>=0.1,<1",
 ]
 
 [tool.uv]

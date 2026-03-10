@@ -19,3 +19,5 @@ tqdm
 matplotlib
 opencv-python
 imblearn
+onnx
+onnxscript
