@@ -57,6 +57,9 @@ ENV LD_LIBRARY_PATH="/opt/onnxruntime/lib:${LD_LIBRARY_PATH}"
 WORKDIR /app
 COPY . /app
 
+# Safety: if the build cache ever sneaks into the image, wipe it.
+RUN rm -rf /app/build/cpp /app/build/CMakeCache.txt /app/build
+
 RUN cmake -S cpp -B build/cpp \
     && cmake --build build/cpp -j
 

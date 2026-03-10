@@ -1,0 +1,20 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local build artifacts
+build
+
+# Local dataset/cache artifacts
+TEMP
+data
+
+# Training artifacts are mounted at runtime via docker compose.
+main/models
+
