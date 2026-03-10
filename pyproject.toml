@@ -7,8 +7,6 @@ requires-python = ">=3.11,<3.12"
 dependencies = [
     "flask>=3.1,<4",
     "kagglehub>=1,<2",
-    "tensorflow[and-cuda]>=2.20,<2.21; platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "tensorflow>=2.20,<2.21; platform_system != 'Linux' or platform_machine != 'x86_64'",
     "torch>=2.7,<3",
     "torchvision>=0.22,<1",
     "scikit-learn>=1.5,<2",
@@ -18,9 +16,6 @@ dependencies = [
     "pillow>=10,<12",
     "rich>=13.9,<14",
     "tqdm>=4.67,<5",
-    "matplotlib>=3.9,<4",
-    "opencv-python>=4.10,<5",
-    "imbalanced-learn>=0.13,<0.15",
     "onnx>=1.16,<2",
     "onnxscript>=0.1,<1",
 ]

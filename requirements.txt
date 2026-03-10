@@ -3,8 +3,6 @@
 
 Flask
 kagglehub
-tensorflow[and-cuda] ; platform_system == "Linux" and platform_machine == "x86_64"
-tensorflow ; platform_system != "Linux" or platform_machine != "x86_64"
 torch ; platform_system == "Linux" and platform_machine == "x86_64"
 torchvision ; platform_system == "Linux" and platform_machine == "x86_64"
 torch ; platform_system != "Linux" or platform_machine != "x86_64"
@@ -16,8 +14,5 @@ pandas
 pillow
 rich
 tqdm
-matplotlib
-opencv-python
-imblearn
 onnx
 onnxscript

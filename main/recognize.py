@@ -2,7 +2,6 @@ import json
 import os
 from functools import lru_cache
 
-import numpy as np
 import torch
 
 import main.utils.config as config
@@ -21,47 +20,6 @@ def load_serving_manifest():
     return {}
 
 
-class TensorFlowRecognitionService:
-    def __init__(self, manifest):
-        import tensorflow as tf
-
-        import main.utils.process as tf_process
-
-        keras_model_path = manifest.get(
-            "keras_model_path",
-            os.path.join(configs["model_path"], "ButterflyC.keras"),
-        )
-        labels_path = manifest.get("labels_path", configs["labels_path"])
-
-        if not os.path.exists(keras_model_path):
-            raise FileNotFoundError(f"Model file not found: {keras_model_path}")
-        if not os.path.exists(labels_path):
-            raise FileNotFoundError(f"Labels file not found: {labels_path}")
-
-        self.tf = tf
-        self.tf_process = tf_process
-        self.model = tf.keras.models.load_model(keras_model_path)
-        self.labels = load_label_artifacts(labels_path)
-
-    def predict(self, pic_path):
-        if not pic_path:
-            return [None, ["default"]]
-
-        pic_array = self.tf_process.process_img(
-            pic_path,
-            (configs["image_size"], configs["image_size"]),
-        )
-        predictions = self.model.predict(pic_array, verbose=0)
-        predicted_index = int(np.argmax(predictions, axis=1)[0])
-
-        if predicted_index >= len(self.labels):
-            raise IndexError(
-                f"Predicted class index {predicted_index} is out of range for labels."
-            )
-
-        return [pic_path, [self.labels[predicted_index]]]
-
-
 class TorchRecognitionService:
     def __init__(self, manifest):
         model_path = manifest.get(
@@ -71,9 +29,15 @@ class TorchRecognitionService:
         labels_path = manifest.get("labels_path", configs["labels_path"])
 
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}. "
+                "Run `uv run python -m main.train --model-name ButterflyC` first."
+            )
         if not os.path.exists(labels_path):
-            raise FileNotFoundError(f"Labels file not found: {labels_path}")
+            raise FileNotFoundError(
+                f"Labels file not found: {labels_path}. "
+                "Run `uv run python -m main.train --model-name ButterflyC` first."
+            )
 
         payload = torch.load(model_path, map_location="cpu")
         model_name = normalize_model_name(
@@ -114,17 +78,8 @@ class TorchRecognitionService:
 
 def build_recognition_service():
     manifest = load_serving_manifest()
-    backend = manifest.get("backend")
-
-    if backend == "torch":
-        return TorchRecognitionService(manifest)
-    if backend == "tensorflow":
-        return TensorFlowRecognitionService(manifest)
-
-    torch_model_path = os.path.join(configs["model_path"], "ButterflyC.pt")
-    if os.path.exists(torch_model_path):
-        return TorchRecognitionService(manifest)
-    return TensorFlowRecognitionService(manifest)
+    # TensorFlow backend has been removed. The service always uses Torch checkpoints.
+    return TorchRecognitionService(manifest)
 
 
 @lru_cache(maxsize=1)

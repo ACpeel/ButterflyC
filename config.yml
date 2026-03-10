@@ -29,13 +29,11 @@ torch_matmul_precision: "high"
 
 static: "app/templates/static"
 source_path: "data"
-model_suffix: "-br.keras"
 
 # --------------------------------------
 
 model_path: "main/models"
 log_dir: "main/models/log"
-saved_model_dir: "main/models/saved_model"
 manifest_path: "main/models/model_manifest.json"
 labels_path: "main/models/labels.json"
 

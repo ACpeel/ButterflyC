@@ -21,7 +21,6 @@ def __docs__():
     epochs: 100
     static: "app/templates/static"
     source_path: "data"
-    model_suffix: ".keras"
     model_path: "main/models"
     log_dir: "main/model/log"
     data: "TEMP/data"
@@ -75,7 +74,6 @@ def load_config(config_file='config.yml')->dict:
     managed_dirs = [
         configs['model_path'],
         configs['log_dir'],
-        configs.get('saved_model_dir'),
         configs['upload_dir'],
         os.path.dirname(configs.get('manifest_path', '')),
         os.path.dirname(configs.get('labels_path', '')),
