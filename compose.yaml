@@ -1,0 +1,14 @@
+services:
+  butterflyc_cpp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cpp
+    image: butterflyc-cpp:local
+    container_name: butterflyc_cpp
+    environment:
+      PORT: "8091"
+    ports:
+      - "8091:8091"
+    volumes:
+      - ./main/models:/app/main/models:rw
+    restart: unless-stopped
