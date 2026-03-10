@@ -2,6 +2,12 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Use USTC mirror for faster/lower-latency apt in CN networks.
+RUN sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.ustc.edu.cn/ubuntu/|g' \
+    -e 's|http://security.ubuntu.com/ubuntu/|https://mirrors.ustc.edu.cn/ubuntu/|g' \
+    /etc/apt/sources.list
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     cmake \
@@ -37,4 +43,3 @@ RUN cmake -S cpp -B build/cpp \
 
 EXPOSE 8091
 CMD ["./build/cpp/butterflyc_server"]
-
