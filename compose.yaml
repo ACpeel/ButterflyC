@@ -2,6 +2,10 @@ services:
   butterflyc_cpp:
     build:
       context: .
+      args:
+        HTTP_PROXY: ${HTTP_PROXY}
+        HTTPS_PROXY: ${HTTPS_PROXY}
+        NO_PROXY: ${NO_PROXY}
     image: butterflyc-cpp:local
     container_name: butterflyc_cpp
     environment:
