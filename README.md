@@ -1,11 +1,9 @@
 #  Butterfly C
 
 
-> 蝴蝶识别系统
-- 训练默认走 PyTorch（优先适配 RTX 5090）
-- 5090 推荐直接用 `uv`
-- 默认模型：EfficientNetB0（模型名：`ButterflyC`）
-- Flask 管理页面（`8090`）
+> 蝴蝶识别 + web 反馈 + Cpp/Crow路由极速响应
+- 训练默认走 PyTorch （RTX 5090） 
+- 默认模型：EfficientNetB0
 - C++ 服务（Crow + ONNX Runtime，`8091`）
 
 
@@ -14,7 +12,7 @@
 
 
 
-#### Start Butterfly C (Flask)
+#### Start Butterfly C
 
 - 下载
 
@@ -97,6 +95,10 @@ docker compose up --build
 
 - 测试
 
+> 网页直接上传即可
+
+> 终端
+
 ```bash
 curl -s http://127.0.0.1:8091/healthz
 curl -s -F "file=@/path/to/test.jpg" http://127.0.0.1:8091/ur
@@ -132,6 +134,9 @@ PORT=8091 ./build/cpp/butterflyc_server
 
 #### Download Dataset
 
+> 如果受限于网络，可使用云盘方式下载，并将目录组织成合适的结构
+
 [123云盘](https://www.123865.com/s/LwbWTd-B8Ii3)
 
 提取码: `chen`
+
